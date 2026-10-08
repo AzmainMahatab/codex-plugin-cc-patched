@@ -1,0 +1,91 @@
+name: Sync patched plugin
+
+on:
+  schedule:
+    # Why: upstream tags a release a few times a month at most; a daily check keeps dist within a day of upstream.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream tag to build (default: latest stable vX.Y.Z)"
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - "patches/**"
+      - "scripts/**"
+      - "PATCHED.md"
+      - ".github/workflows/sync.yml"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Build and publish dist
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out patch queue
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Resolve upstream release and patched version
+        id: resolve
+        env:
+          UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+        run: bash scripts/resolve.sh >> "$GITHUB_OUTPUT"
+
+      - name: Read published dist version
+        id: current
+        run: |
+          if git ls-remote --exit-code --heads origin dist >/dev/null; then
+            git fetch --quiet --depth 1 origin dist
+            echo "version=$(git show FETCH_HEAD:.claude-plugin/marketplace.json | jq -r .metadata.version)" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Node.js
+        if: steps.current.outputs.version != steps.resolve.outputs.version
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+
+      - name: Install Codex CLI
+        if: steps.current.outputs.version != steps.resolve.outputs.version
+        run: npm install -g @openai/codex
+
+      - name: Apply patches, test and build
+        if: steps.current.outputs.version != steps.resolve.outputs.version
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: bash scripts/build.sh "$TAG" "$VERSION" "$RUNNER_TEMP/dist-tree"
+
+      - name: Publish to dist
+        if: steps.current.outputs.version != steps.resolve.outputs.version
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: bash scripts/publish.sh "$RUNNER_TEMP/dist-tree" "$VERSION" "$TAG"
+
+      - name: Report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          body="Building against upstream ${TAG:-unknown} failed: $RUN_URL"$'\n\n'"If \`git am\` failed, upstream changed the patched code: rebase \`patches/\` onto the new tag (see README)."
+          existing="$(gh issue list --state open --label sync-failure --json number --jq '.[0].number // empty')"
+          if [[ -n "$existing" ]]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "Patch sync failed" --label sync-failure --body "$body"
+          fi

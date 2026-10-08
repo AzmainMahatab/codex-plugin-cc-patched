@@ -1,0 +1,177 @@
+From cf7a4554c4d4b760f6161019e59d4257a191d10f Mon Sep 17 00:00:00 2001
+From: AzmainMahatab <103697985+AzmainMahatab@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 17:09:48 -0400
+Subject: [PATCH] Defer sandbox and approval policy to the user's Codex config
+
+Thread start/resume, tasks, native review and adversarial review no longer
+pin `sandbox: "read-only"` / `approvalPolicy: "never"`. They send null so the
+app-server resolves `sandbox_mode`, `approval_policy` and `approvals_reviewer`
+from ~/.codex/config.toml, the same way `model: null` already falls back to the
+configured model. An explicit `task --write` still requests workspace-write.
+
+The rescue agent and runtime skill no longer add `--write` by default, so
+delegated tasks follow the user's configured sandbox and approval reviewer.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ plugins/codex/agents/codex-rescue.md          |  2 +-
+ plugins/codex/scripts/codex-companion.mjs     |  4 +-
+ plugins/codex/scripts/lib/codex.mjs           | 10 ++--
+ .../codex/skills/codex-cli-runtime/SKILL.md   |  2 +-
+ tests/fake-codex-fixture.mjs                  |  1 +
+ tests/inherit-config.test.mjs                 | 51 +++++++++++++++++++
+ 6 files changed, 61 insertions(+), 9 deletions(-)
+ create mode 100644 tests/inherit-config.test.mjs
+
+diff --git a/plugins/codex/agents/codex-rescue.md b/plugins/codex/agents/codex-rescue.md
+index 7009ec8..38a972b 100644
+--- a/plugins/codex/agents/codex-rescue.md
++++ b/plugins/codex/agents/codex-rescue.md
+@@ -31,7 +31,7 @@ Forwarding rules:
+ - If the user asks for `spark`, map that to `--model gpt-5.3-codex-spark`.
+ - If the user asks for a concrete model name such as `gpt-5.4-mini`, pass it through with `--model`.
+ - Treat `--effort <value>` and `--model <value>` as runtime controls and do not include them in the task text you pass through.
+-- Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
++- Leave the sandbox unset by default so Codex applies the user's `sandbox_mode`, `approval_policy` and `approvals_reviewer` from `~/.codex/config.toml`. Add `--write` only when the user explicitly asks for a workspace-write sandbox.
+ - Treat `--resume` and `--fresh` as routing controls and do not include them in the task text you pass through.
+ - `--resume` means add `--resume-last`.
+ - `--fresh` means do not add `--resume-last`.
+diff --git a/plugins/codex/scripts/codex-companion.mjs b/plugins/codex/scripts/codex-companion.mjs
+index 83df468..37c334f 100644
+--- a/plugins/codex/scripts/codex-companion.mjs
++++ b/plugins/codex/scripts/codex-companion.mjs
+@@ -411,7 +411,7 @@ async function executeReviewRun(request) {
+   const result = await runAppServerTurn(context.repoRoot, {
+     prompt,
+     model: request.model,
+-    sandbox: "read-only",
++    sandbox: null,
+     outputSchema: readOutputSchema(REVIEW_SCHEMA),
+     onProgress: request.onProgress
+   });
+@@ -488,7 +488,7 @@ async function executeTaskRun(request) {
+     defaultPrompt: resumeThreadId ? DEFAULT_CONTINUE_PROMPT : "",
+     model: request.model,
+     effort: request.effort,
+-    sandbox: request.write ? "workspace-write" : "read-only",
++    sandbox: request.write ? "workspace-write" : null,
+     onProgress: request.onProgress,
+     persistThread: true,
+     threadName: resumeThreadId ? null : buildPersistentTaskThreadName(request.prompt || DEFAULT_CONTINUE_PROMPT)
+diff --git a/plugins/codex/scripts/lib/codex.mjs b/plugins/codex/scripts/lib/codex.mjs
+index fead00c..c06656b 100644
+--- a/plugins/codex/scripts/lib/codex.mjs
++++ b/plugins/codex/scripts/lib/codex.mjs
+@@ -64,8 +64,8 @@ function buildThreadParams(cwd, options = {}) {
+   return {
+     cwd,
+     model: options.model ?? null,
+-    approvalPolicy: options.approvalPolicy ?? "never",
+-    sandbox: options.sandbox ?? "read-only",
++    approvalPolicy: options.approvalPolicy ?? null,
++    sandbox: options.sandbox ?? null,
+     serviceName: SERVICE_NAME,
+     ephemeral: options.ephemeral ?? true
+   };
+@@ -77,8 +77,8 @@ function buildResumeParams(threadId, cwd, options = {}) {
+     threadId,
+     cwd,
+     model: options.model ?? null,
+-    approvalPolicy: options.approvalPolicy ?? "never",
+-    sandbox: options.sandbox ?? "read-only"
++    approvalPolicy: options.approvalPolicy ?? null,
++    sandbox: options.sandbox ?? null
+   };
+ }
+ 
+@@ -1009,7 +1009,7 @@ export async function runAppServerReview(cwd, options = {}) {
+     emitProgress(options.onProgress, "Starting Codex review thread.", "starting");
+     const thread = await startThread(client, cwd, {
+       model: options.model,
+-      sandbox: "read-only",
++      sandbox: null,
+       ephemeral: true,
+       threadName: options.threadName
+     });
+diff --git a/plugins/codex/skills/codex-cli-runtime/SKILL.md b/plugins/codex/skills/codex-cli-runtime/SKILL.md
+index 0e91bfb..4367ba0 100644
+--- a/plugins/codex/skills/codex-cli-runtime/SKILL.md
++++ b/plugins/codex/skills/codex-cli-runtime/SKILL.md
+@@ -21,7 +21,7 @@ Execution rules:
+ - Leave `--effort` unset unless the user explicitly requests a specific effort.
+ - Leave model unset by default. Add `--model` only when the user explicitly asks for one.
+ - Map `spark` to `--model gpt-5.3-codex-spark`.
+-- Default to a write-capable Codex run by adding `--write` unless the user explicitly asks for read-only behavior or only wants review, diagnosis, or research without edits.
++- Leave the sandbox unset by default so Codex applies the user's `sandbox_mode`, `approval_policy` and `approvals_reviewer` from `~/.codex/config.toml`. Add `--write` only when the user explicitly asks for a workspace-write sandbox.
+ 
+ Command selection:
+ - Use exactly one `task` invocation per rescue handoff.
+diff --git a/tests/fake-codex-fixture.mjs b/tests/fake-codex-fixture.mjs
+index f83c96a..ffcea03 100644
+--- a/tests/fake-codex-fixture.mjs
++++ b/tests/fake-codex-fixture.mjs
+@@ -312,6 +312,7 @@ rl.on("line", (line) => {
+         if (requiresExperimental("persistExtendedHistory", message, state) || requiresExperimental("persistFullHistory", message, state)) {
+           throw new Error("thread/start.persistFullHistory requires experimentalApi capability");
+         }
++        state.lastThreadStartPolicy = { sandbox: message.params.sandbox, approvalPolicy: message.params.approvalPolicy };
+         const thread = nextThread(state, message.params.cwd, message.params.ephemeral);
+         send({ id: message.id, result: { thread: buildThread(thread), model: message.params.model || "gpt-5.4", modelProvider: "openai", serviceTier: null, cwd: thread.cwd, approvalPolicy: "never", sandbox: { type: "readOnly", access: { type: "fullAccess" }, networkAccess: false }, reasoningEffort: null } });
+         send({ method: "thread/started", params: { thread: { id: thread.id } } });
+diff --git a/tests/inherit-config.test.mjs b/tests/inherit-config.test.mjs
+new file mode 100644
+index 0000000..4137910
+--- /dev/null
++++ b/tests/inherit-config.test.mjs
+@@ -0,0 +1,51 @@
++import fs from "node:fs";
++import path from "node:path";
++import test from "node:test";
++import assert from "node:assert/strict";
++import { fileURLToPath } from "node:url";
++
++import { buildEnv, installFakeCodex } from "./fake-codex-fixture.mjs";
++import { initGitRepo, makeTempDir, run } from "./helpers.mjs";
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
++const SCRIPT = path.join(ROOT, "plugins", "codex", "scripts", "codex-companion.mjs");
++
++function repoWithUncommittedChange() {
++  const repo = makeTempDir();
++  initGitRepo(repo);
++  fs.mkdirSync(path.join(repo, "src"));
++  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = items[0];\n");
++  run("git", ["add", "src/app.js"], { cwd: repo });
++  run("git", ["commit", "-m", "init"], { cwd: repo });
++  fs.writeFileSync(path.join(repo, "src", "app.js"), "export const value = items[0].id;\n");
++  return repo;
++}
++
++function runCompanion(args) {
++  const repo = repoWithUncommittedChange();
++  const binDir = makeTempDir();
++  installFakeCodex(binDir);
++  const result = run("node", [SCRIPT, ...args], { cwd: repo, env: buildEnv(binDir) });
++  assert.equal(result.status, 0, result.stderr);
++  const state = JSON.parse(fs.readFileSync(path.join(binDir, "fake-codex-state.json"), "utf8"));
++  return state.lastThreadStartPolicy;
++}
++
++// Intention: a null sandbox and approval policy make the app-server resolve both from the user's config.toml.
++const INHERITED = { sandbox: null, approvalPolicy: null };
++
++test("task defers sandbox and approval policy to the user's Codex config", () => {
++  assert.deepEqual(runCompanion(["task", "inspect the change"]), INHERITED);
++});
++
++test("task --write requests a workspace-write sandbox and keeps the configured approval policy", () => {
++  assert.deepEqual(runCompanion(["task", "--write", "apply the fix"]), { sandbox: "workspace-write", approvalPolicy: null });
++});
++
++test("review defers sandbox and approval policy to the user's Codex config", () => {
++  assert.deepEqual(runCompanion(["review"]), INHERITED);
++});
++
++test("adversarial review defers sandbox and approval policy to the user's Codex config", () => {
++  assert.deepEqual(runCompanion(["adversarial-review"]), INHERITED);
++});

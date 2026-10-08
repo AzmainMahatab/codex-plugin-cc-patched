@@ -1,0 +1,21 @@
+{
+  "name": "codex-plugin-cc-patched",
+  "owner": {
+    "name": "AzmainMahatab"
+  },
+  "metadata": {
+    "description": "Codex plugin for Claude Code (upstream openai/codex-plugin-cc v1.0.6), patched to follow the sandbox and approval settings in ~/.codex/config.toml.",
+    "version": "1.0.6-patched.h5eda7936"
+  },
+  "plugins": [
+    {
+      "name": "codex",
+      "description": "Use Codex from Claude Code to review code or delegate tasks.",
+      "version": "1.0.6-patched.h5eda7936",
+      "author": {
+        "name": "OpenAI"
+      },
+      "source": "./plugins/codex"
+    }
+  ]
+}
